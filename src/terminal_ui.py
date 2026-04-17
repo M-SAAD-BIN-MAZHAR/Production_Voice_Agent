@@ -1,4 +1,14 @@
-"""Simple terminal UI for voice agent."""
+"""Simple terminal UI for voice agent.
+
+Provides a basic console-based user interface for the voice agent.
+Displays conversation transcripts, system status, and error messages.
+
+Key Features:
+- Real-time transcript display
+- System state indicators with emojis
+- Error message display
+- Timestamp tracking
+"""
 
 import asyncio
 import logging

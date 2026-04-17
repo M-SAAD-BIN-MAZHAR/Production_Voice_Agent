@@ -1,4 +1,15 @@
-"""Data models for the real-time voice agent system."""
+"""Data models for the real-time voice agent system.
+
+Defines all data structures used throughout the voice agent:
+- AudioChunk: Raw audio data with metadata
+- VADEvent: Voice activity detection events
+- Transcript: Speech-to-text results
+- Message: Conversation messages
+- SystemState: Agent state machine
+- ConversationTurn: Memory storage unit
+
+All models use dataclasses for efficiency and type safety.
+"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -8,7 +19,14 @@ import numpy as np
 
 @dataclass
 class AudioChunk:
-    """Represents a chunk of audio data."""
+    """Represents a chunk of audio data.
+    
+    🔊 SOUND QUALITY: Core audio data structure
+    - data: Raw audio samples (int16 format, -32768 to 32767)
+    - sample_rate: Must match input (16kHz) or output (24kHz) requirements
+    - timestamp: For latency tracking and synchronization
+    - duration_ms: For playback timing calculations
+    """
     data: np.ndarray  # Audio samples (int16)
     sample_rate: int  # Samples per second
     timestamp: float  # Unix timestamp

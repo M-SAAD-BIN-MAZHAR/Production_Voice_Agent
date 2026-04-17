@@ -192,20 +192,33 @@ class TTSService:
             start_time = time.time()
             
             # Create speech synthesis request
+            # 🔊 SOUND QUALITY PARAMETERS:
+            # - model: "tts-1" (faster) vs "tts-1-hd" (higher quality, slower)
+            # - voice: "alloy/echo/fable/onyx/nova/shimmer" - affects tone and gender
+            # - speed: 0.25-4.0 (default 1.0) - lower = slower/clearer, higher = faster
+            #   * 0.85 = 15% slower for better clarity
+            #   * 1.0 = normal speed (CURRENT - balanced)
+            #   * 1.2 = 20% faster
             response = await self.client.audio.speech.create(
                 model=self.model,
                 voice=self.voice,
                 input=text,
                 response_format="pcm",  # Raw PCM for streaming
-                speed=1.0
+                speed=1.0  # 🔊 SOUND QUALITY: Normal speed (0.25 to 4.0)
             )
             
             # Get the audio content
             audio_content = response.content
             
+            # 🔊 SOUND QUALITY PARAMETERS:
+            # - chunk_size: Larger = smoother playback but higher latency
+            #   * 4096 (4KB) = low latency, may be choppy
+            #   * 8192 (8KB) = balanced
+            #   * 16384 (16KB) = smooth playback, slightly higher latency
+            # - sample_rate: 24000 Hz (OpenAI default, don't change)
             # Stream audio chunks - larger chunks for smoother playback
-            chunk_size = 16384  # 16KB chunks for smoother playback
-            sample_rate = 24000  # OpenAI TTS outputs 24kHz
+            chunk_size = 16384  # 🔊 SOUND QUALITY: 16KB chunks for smoother playback
+            sample_rate = 24000  # 🔊 SOUND QUALITY: OpenAI TTS outputs 24kHz (fixed)
             
             first_chunk = True
             first_chunk_time = None
@@ -220,6 +233,15 @@ class TTSService:
                 
                 # Convert bytes to int16 numpy array
                 audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+                
+                # 🔊 SOUND QUALITY: Volume amplification
+                # Multiply factor controls loudness:
+                # - 1.0 = original volume
+                # - 1.5 = 50% louder (current setting)
+                # - 2.0 = 100% louder (may cause distortion)
+                # - 0.8 = 20% quieter
+                # np.clip prevents distortion by limiting values to int16 range (-32768 to 32767)
+                audio_data = np.clip(audio_data * 1.5, -32768, 32767).astype(np.int16)
                 
                 # Calculate duration
                 duration_ms = int(len(audio_data) / sample_rate * 1000)

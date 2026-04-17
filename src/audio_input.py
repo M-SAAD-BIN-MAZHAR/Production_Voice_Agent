@@ -53,6 +53,8 @@ class AudioInputCapture:
         if not self._running:
             return
         
+        # 🔊 SOUND QUALITY: Convert float32 to int16 for processing
+        # Multiply by 32767 to scale from [-1.0, 1.0] to [-32768, 32767]
         # Convert to int16 and create AudioChunk
         audio_data = (indata[:, 0] * 32767).astype(np.int16)
         chunk = AudioChunk(
@@ -84,10 +86,15 @@ class AudioInputCapture:
             default_input = sd.query_devices(kind='input')
             logger.info(f"Using input device: {default_input['name']}")
             
+            # 🔊 SOUND QUALITY PARAMETERS:
+            # - samplerate: Input audio quality (16000 Hz = wideband, good for speech)
+            # - channels: 1 (mono) is sufficient for voice input
+            # - dtype: np.float32 (internal processing format)
+            # - blocksize: Matches chunk_size for consistent processing
             # Create input stream
             self._stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,  # Mono
+                samplerate=self.sample_rate,  # 🔊 SOUND QUALITY: 16kHz for speech recognition
+                channels=1,  # 🔊 SOUND QUALITY: Mono input
                 dtype=np.float32,
                 blocksize=self.chunk_size,
                 callback=self._audio_callback

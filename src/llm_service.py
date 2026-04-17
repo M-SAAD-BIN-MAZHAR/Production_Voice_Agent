@@ -1,4 +1,14 @@
-"""Large Language Model service using OpenAI."""
+"""Large Language Model service using OpenAI.
+
+Handles conversation generation using OpenAI's Chat Completions API.
+Supports streaming responses for real-time token-by-token output.
+
+Key Features:
+- Streaming token generation for low latency
+- Conversation context management
+- Cancellation support for interrupts
+- Rate limit handling
+"""
 
 import asyncio
 import logging
@@ -88,14 +98,22 @@ class LLMService:
         
         try:
             # Create streaming completion
+            # 🤖 LLM PARAMETERS:
+            # - model: "gpt-4o-mini" (fast, cheap) or "gpt-4o" (smarter, slower, expensive)
+            # - temperature: 0.0-2.0 (0.7 = balanced creativity)
+            #   * Lower (0.3-0.5) = more focused, deterministic
+            #   * Higher (0.8-1.0) = more creative, varied
+            # - max_tokens: Maximum response length (500 = ~375 words)
+            #   * Shorter = faster responses, lower cost
+            #   * Longer = more detailed responses
             # Note: OpenAI SDK returns a coroutine that resolves to an async generator
             # For testing, mocks can return async generators directly
             stream_coro = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 stream=True,
-                temperature=0.7,
-                max_tokens=500
+                temperature=0.7,  # 🤖 LLM: Creativity level (0.0-2.0)
+                max_tokens=500    # 🤖 LLM: Max response length
             )
             
             # Check if it's a coroutine (real SDK) or async generator (mock)

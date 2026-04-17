@@ -1,4 +1,19 @@
-"""Configuration manager with validation."""
+"""Configuration manager with validation.
+
+Manages loading, validation, and saving of configuration from multiple sources:
+- YAML/JSON configuration files
+- Environment variables
+- Default values
+
+Priority: Environment variables > Config file > Defaults
+
+Key Features:
+- Multi-source configuration loading
+- Pydantic validation
+- Type conversion
+- Required field validation
+- Provider-specific validation
+"""
 
 import os
 import logging

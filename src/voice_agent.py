@@ -1,4 +1,18 @@
-"""Voice agent orchestrator - main async loop coordinating all components."""
+"""Voice agent orchestrator - main async loop coordinating all components.
+
+This is the main orchestrator that coordinates all voice agent components:
+- Audio Input: Captures microphone audio
+- VAD: Detects when user is speaking
+- STT: Converts speech to text (Deepgram)
+- LLM: Generates intelligent responses (OpenAI)
+- TTS: Converts text to speech (OpenAI)
+- Audio Output: Plays synthesized speech
+- Interrupt Manager: Handles barge-in when user interrupts
+- Memory Manager: Maintains conversation context
+- Response Cache: Caches responses for instant playback
+
+The orchestrator uses async/await with queue-based communication between components.
+"""
 
 import asyncio
 import logging
@@ -67,7 +81,7 @@ class VoiceAgent:
         )
         
         self.audio_output = AudioOutputPlayer(
-            sample_rate=24000  # TTS output sample rate
+            sample_rate=24000  # 🔊 SOUND QUALITY: TTS output sample rate (must match TTS service)
         )
         
         self.interrupt_manager = InterruptManager()
@@ -83,6 +97,8 @@ class VoiceAgent:
         self.ui = TerminalUI()
         
         # Response cache for common queries
+        # 💾 PERFORMANCE: Caches text and audio responses for 24 hours
+        # Provides instant playback for repeated queries
         self.cache = ResponseCache(
             cache_dir="./data/response_cache",
             max_age_seconds=86400  # 24 hours
@@ -207,7 +223,7 @@ class VoiceAgent:
                 # Put in queue for interrupt monitoring
                 await self._vad_queue.put(vad_event)
                 
-                # Log speech events
+                # Log speech events (only start and end, not continue)
                 if vad_event.event_type == VADEventType.SPEECH_START:
                     logger.info("Speech started")
                 elif vad_event.event_type == VADEventType.SPEECH_END:
@@ -320,11 +336,19 @@ class VoiceAgent:
                         # Update state back to listening
                         self.interrupt_manager.set_state(SystemState.LISTENING)
                         await self.ui.update_status(SystemState.LISTENING)
-                        continue
+                        continue  # Skip rate limiting for cached responses
                 
-                # Delay to avoid rate limiting (only if not cached)
-                if not cached_text:
-                    await asyncio.sleep(25.0)  # 25 seconds to stay under 3 requests/min limit
+                # Check if there are pending queries in the queue
+                pending_queries = self._transcript_queue.qsize()
+                if pending_queries > 0:
+                    logger.info(f"Skipping rate limit delay - {pending_queries} queries pending in queue")
+                
+                # ⚠️ RATE LIMITING DISABLED
+                # The 25-second delay has been removed per user request
+                # WARNING: This may cause OpenAI rate limit errors (429 errors)
+                # Your OpenAI account limit: 3 requests/min (free tier)
+                # To avoid errors, upgrade your OpenAI account or re-enable the delay
+                # await asyncio.sleep(25.0)  # Commented out - was preventing rate limits
                 
                 # Get conversation context from memory
                 context = await self.memory.get_context(user_input)
@@ -369,34 +393,15 @@ class VoiceAgent:
                     await self.ui.update_status(SystemState.SPEAKING)
                     self._is_speaking = True
                     
-                    # Synthesize and play audio with parallel sentence processing
+                    # Synthesize and play audio - USE SINGLE REQUEST FOR SPEED
                     audio_chunks_for_cache = []
                     
-                    if not cached_text:
-                        # NEW: Parallel processing - synthesize sentence by sentence
-                        logger.info("Using parallel LLM+TTS processing")
-                        
-                        # Create async generator from response tokens
-                        async def token_generator():
-                            for token in response_tokens:
-                                yield token
-                        
-                        # Stream synthesis with sentence-by-sentence processing
-                        try:
-                            async for audio_chunk in self.tts.synthesize_stream(token_generator()):
-                                audio_chunks_for_cache.append(audio_chunk)
-                                await self.audio_output.play(audio_chunk)
-                        except Exception as e:
-                            logger.error(f"Error in parallel TTS: {e}")
-                            # Fallback to regular synthesis
-                            async for audio_chunk in self.tts.synthesize(full_response):
-                                audio_chunks_for_cache.append(audio_chunk)
-                                await self.audio_output.play(audio_chunk)
-                    else:
-                        # Synthesize full response (cached text, no audio cache)
-                        async for audio_chunk in self.tts.synthesize(full_response):
-                            audio_chunks_for_cache.append(audio_chunk)
-                            await self.audio_output.play(audio_chunk)
+                    # ⚡ PERFORMANCE: Use single TTS request instead of parallel sentence processing
+                    # This reduces API calls from 3+ to 1, avoiding rate limits
+                    logger.info("Synthesizing full response in single request for speed")
+                    async for audio_chunk in self.tts.synthesize(full_response):
+                        audio_chunks_for_cache.append(audio_chunk)
+                        await self.audio_output.play(audio_chunk)
                     
                     # Cache audio for future use
                     if audio_chunks_for_cache:

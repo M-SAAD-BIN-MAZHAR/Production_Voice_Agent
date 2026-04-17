@@ -1,4 +1,21 @@
-"""Interrupt manager for handling barge-in during agent responses."""
+"""Interrupt manager for handling barge-in during agent responses.
+
+Monitors for barge-in conditions where the user starts speaking while
+the agent is still speaking. When detected, interrupts the agent's response
+and allows the user to speak.
+
+Key Features:
+- Real-time barge-in detection
+- Debouncing to prevent rapid successive interrupts
+- Callback system for interrupt handling
+- Latency tracking for performance monitoring
+
+⚡ PERFORMANCE IMPACT:
+- interrupt_debounce_ms: Minimum time between interrupts (prevents cutting off responses)
+  * Current: 3500ms (3.5 seconds)
+  * Lower = more responsive but may cut off responses prematurely
+  * Higher = less responsive but more stable
+"""
 
 import asyncio
 import logging
@@ -23,6 +40,10 @@ class InterruptManager:
         # Timing tracking
         self._last_interrupt_time: Optional[float] = None
         self._interrupt_count = 0
+        # ⚡ PERFORMANCE: Debounce time prevents rapid successive interrupts
+        # Current: 3500ms (3.5 seconds) - prevents cutting off agent responses
+        # Lower (1000-2000ms) = more responsive, may cut off responses
+        # Higher (4000-5000ms) = less responsive, more stable
         self._interrupt_debounce_ms = 3500  # Minimum 3.5 seconds between interrupts to prevent cutting off responses
         
         logger.info("InterruptManager initialized")

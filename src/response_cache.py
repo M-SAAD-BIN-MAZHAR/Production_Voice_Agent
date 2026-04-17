@@ -1,4 +1,20 @@
-"""Response cache for common queries to reduce latency and API costs."""
+"""Response cache for common queries to reduce latency and API costs.
+
+Caches both text responses (from LLM) and audio responses (from TTS) to provide
+instant playback for repeated queries. Significantly reduces API costs and latency.
+
+Key Features:
+- Dual caching: text and audio
+- Persistent storage (survives restarts)
+- Automatic expiration (24 hours default)
+- Case-insensitive query matching
+- Async disk I/O
+
+💾 PERFORMANCE IMPACT:
+- Cache hit = instant response (no API calls)
+- Cache miss = normal API latency
+- max_age_seconds: Longer = more cache hits but stale responses
+"""
 
 import asyncio
 import logging
@@ -25,6 +41,10 @@ class ResponseCache:
         Args:
             cache_dir: Directory to store cache files
             max_age_seconds: Maximum age of cached responses (default: 24 hours)
+                💾 PERFORMANCE: Longer = more cache hits but potentially stale responses
+                - 3600 (1 hour) = fresh responses, fewer cache hits
+                - 86400 (24 hours) = balanced (current)
+                - 604800 (7 days) = maximum cache hits, may be stale
         """
         self.cache_dir = Path(cache_dir)
         self.max_age_seconds = max_age_seconds

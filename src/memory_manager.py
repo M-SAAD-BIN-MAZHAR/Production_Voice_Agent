@@ -1,4 +1,20 @@
-"""Memory manager for conversation history with vector search."""
+"""Memory manager for conversation history with vector search.
+
+Manages conversation history using FAISS vector database for semantic search.
+Combines recent conversation turns with semantically similar past turns to
+provide relevant context to the LLM.
+
+Key Features:
+- Vector embeddings for semantic similarity search
+- Persistent storage (survives restarts)
+- Hybrid context retrieval (recent + similar turns)
+- Token limit management
+
+💾 PERFORMANCE IMPACT:
+- max_turns: More turns = better context but slower search
+- similarity_top_k: More results = better context but higher token usage
+- recent_turns: Always included for temporal context
+"""
 
 import asyncio
 import logging
@@ -34,8 +50,11 @@ class MemoryManager:
         Args:
             openai_api_key: OpenAI API key for embeddings
             max_turns: Maximum conversation turns to store (default: 10)
+                💾 PERFORMANCE: More turns = better long-term memory but slower
             similarity_top_k: Number of similar turns to retrieve (default: 5)
+                💾 PERFORMANCE: More results = better context but higher token usage
             recent_turns: Number of recent turns to always include (default: 3)
+                💾 PERFORMANCE: Always included for temporal context
             vector_db_path: Path to persist FAISS index (default: ./data/conversation_memory)
         """
         self.max_turns = max_turns

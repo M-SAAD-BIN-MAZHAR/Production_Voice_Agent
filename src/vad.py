@@ -1,4 +1,18 @@
-"""Voice Activity Detection module."""
+"""Voice Activity Detection module.
+
+Detects when the user is speaking using Silero VAD (Voice Activity Detection).
+Uses a state machine to track speech start/end events with configurable sensitivity.
+
+Key Features:
+- Silero VAD model for accurate speech detection
+- Fallback to energy-based VAD if model fails
+- Configurable threshold and silence duration
+- State machine for reliable speech boundary detection
+
+🔊 SOUND QUALITY IMPACT:
+- threshold: Higher = less sensitive, cleaner detection (fewer false positives)
+- silence_duration_ms: Longer = won't cut off natural pauses in speech
+"""
 
 import asyncio
 import logging
@@ -21,7 +35,15 @@ class VADModule:
         
         Args:
             threshold: Speech detection threshold (0.0-1.0, default: 0.5)
+                🔊 SOUND QUALITY: Higher threshold = less sensitive
+                - 0.5-0.7: More sensitive, may pick up background noise
+                - 0.8-0.9: Balanced (recommended)
+                - 0.9-0.95: Less sensitive, cleaner detection
             silence_duration_ms: Milliseconds of silence before SPEECH_END (default: 700)
+                🔊 SOUND QUALITY: Longer duration = won't cut off pauses
+                - 500-1000ms: Faster response, may cut off speech
+                - 1000-1500ms: Balanced (recommended)
+                - 1500-2000ms: More patient, won't cut off natural pauses
         """
         self.threshold = threshold
         self.silence_duration_ms = silence_duration_ms

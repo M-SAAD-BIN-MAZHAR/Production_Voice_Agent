@@ -94,13 +94,22 @@ class AudioOutputPlayer:
             default_output = sd.query_devices(kind='output')
             logger.info(f"Using output device: {default_output['name']}")
             
+            # 🔊 SOUND QUALITY PARAMETERS:
+            # - samplerate: Must match TTS output (24000 Hz for OpenAI)
+            # - channels: 1 (mono) or 2 (stereo) - mono is sufficient for voice
+            # - dtype: np.int16 (16-bit audio, standard quality)
+            # - blocksize: Buffer size affects smoothness
+            #   * 512 = low latency, may be choppy
+            #   * 1024 = balanced
+            #   * 2048 = smoother playback, slightly higher latency
+            #   * 4096 = very smooth, higher latency
             # Create output stream with larger buffer
             self._stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=1,  # Mono
-                dtype=np.int16,
+                samplerate=self.sample_rate,  # 🔊 SOUND QUALITY: Must match TTS (24000 Hz)
+                channels=1,  # 🔊 SOUND QUALITY: Mono (1) or Stereo (2)
+                dtype=np.int16,  # 🔊 SOUND QUALITY: 16-bit audio quality
                 callback=self._audio_callback,
-                blocksize=2048  # Larger buffer for smoother playback
+                blocksize=2048  # 🔊 SOUND QUALITY: Larger buffer = smoother playback
             )
             
             self._running = True
