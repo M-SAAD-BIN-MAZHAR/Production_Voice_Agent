@@ -1,0 +1,492 @@
+"""Text-to-Speech service using OpenAI, ElevenLabs, or Edge-TTS."""
+
+import asyncio
+import logging
+from typing import AsyncIterator, Optional
+import time
+import re
+import numpy as np
+
+from openai import AsyncOpenAI
+
+from src.models import AudioChunk
+
+# Optional imports
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except ImportError:
+    EDGE_TTS_AVAILABLE = False
+
+try:
+    from elevenlabs import ElevenLabs
+    ELEVENLABS_AVAILABLE = True
+except ImportError:
+    ELEVENLABS_AVAILABLE = False
+
+
+logger = logging.getLogger(__name__)
+
+
+class TTSService:
+    """TTS service with sentence buffering for streaming synthesis."""
+    
+    def __init__(
+        self,
+        provider: str = "openai",
+        api_key: Optional[str] = None,
+        voice: str = "alloy",
+        model: str = "tts-1"
+    ):
+        """
+        Initialize TTS service.
+        
+        Args:
+            provider: TTS provider ("openai", "elevenlabs", or "edge-tts")
+            api_key: API key (required for openai and elevenlabs)
+            voice: Voice name 
+                - openai: alloy/echo/fable/onyx/nova/shimmer
+                - elevenlabs: bella/rachel/adam/arnold/charlotte/clyde/etc
+                - edge-tts: en-US-AriaNeural
+            model: Model name (openai: tts-1 or tts-1-hd)
+        """
+        self.provider = provider
+        self.voice = voice
+        self.model = model
+        
+        # ElevenLabs voice ID mapping
+        self.elevenlabs_voice_ids = {
+            "bella": "EXAVITQu4vr4xnSDxMaL",
+            "rachel": "21m00Tcm4TlvDq8ikWAM",
+            "adam": "pNInz6obpgDQGcFmaJgB",
+            "arnold": "VR6AewLHbXG4fxvB1xwl",
+            "charlotte": "XB0fDUnXU5powFXDhCwa",
+            "clyde": "2EiwWnXFnvU5JabPnv94",
+            "george": "JBFqnCBsd6RMkjW3MqDe",
+            "jessica": "aZe922EeXeKc9MZ0xBZO",
+            "michael": "IB3nSCWiQThq3daIHI30",
+            "sam": "yoZ06aMxZJJ28mfd3POQ",
+        }
+        
+        # Initialize provider client
+        if provider == "openai":
+            if not api_key:
+                raise ValueError("API key required for OpenAI TTS")
+            self.client = AsyncOpenAI(api_key=api_key)
+        elif provider == "elevenlabs":
+            if not ELEVENLABS_AVAILABLE:
+                raise ValueError("elevenlabs package not installed. Install with: pip install elevenlabs")
+            if not api_key:
+                raise ValueError("API key required for ElevenLabs TTS")
+            self.client = ElevenLabs(api_key=api_key)
+            # Map voice name to voice ID
+            if voice in self.elevenlabs_voice_ids:
+                self.voice = self.elevenlabs_voice_ids[voice]
+            else:
+                logger.warning(f"Unknown ElevenLabs voice '{voice}', using as voice ID directly")
+        elif provider == "edge-tts":
+            if not EDGE_TTS_AVAILABLE:
+                raise ValueError("edge-tts package not installed. Install with: pip install edge-tts")
+            self.client = None  # Edge-TTS doesn't need a client
+            if voice == "alloy":  # Default OpenAI voice, switch to Edge-TTS default
+                self.voice = "en-US-AriaNeural"
+        else:
+            raise ValueError(f"Unsupported TTS provider: {provider}")
+        
+        # Cancellation state
+        self._cancelled = False
+        self._pending_tasks: list[asyncio.Task] = []
+        
+        logger.info(f"TTSService initialized: provider={provider}, voice={voice}")
+    
+    def _detect_sentence_boundary(self, text: str) -> tuple[Optional[str], str]:
+        """
+        Detect sentence boundary in text buffer.
+        
+        Args:
+            text: Text buffer to analyze
+            
+        Returns:
+            Tuple of (complete_sentence, remaining_text)
+            If no boundary found, returns (None, text)
+        """
+        # Sentence boundary patterns: . ? ! ; followed by space or end
+        pattern = r'([.?!;])\s+'
+        
+        match = re.search(pattern, text)
+        if match:
+            # Found boundary
+            end_pos = match.end()
+            sentence = text[:end_pos].strip()
+            remaining = text[end_pos:]
+            return sentence, remaining
+        
+        # Check for boundary at end of text
+        if text and text[-1] in '.?!;':
+            return text.strip(), ""
+        
+        # No boundary found
+        return None, text
+    
+    async def synthesize(self, text: str) -> AsyncIterator[AudioChunk]:
+        """
+        Convert text to audio stream.
+        
+        Args:
+            text: Text to synthesize
+            
+        Yields:
+            AudioChunk: Audio chunks as they are generated
+        """
+        if not text or not text.strip():
+            logger.warning("Empty text provided for synthesis")
+            return
+        
+        logger.info(f"Synthesizing text: {text[:50]}...")
+        start_time = time.time()
+        
+        # Reset cancellation flag for this synthesis
+        self._cancelled = False
+        
+        try:
+            if self.provider == "openai":
+                async for chunk in self._synthesize_openai(text):
+                    if self._cancelled:
+                        logger.info("TTS synthesis cancelled")
+                        break
+                    yield chunk
+            elif self.provider == "elevenlabs":
+                async for chunk in self._synthesize_elevenlabs(text):
+                    if self._cancelled:
+                        logger.info("TTS synthesis cancelled")
+                        break
+                    yield chunk
+            elif self.provider == "edge-tts":
+                async for chunk in self._synthesize_edge_tts(text):
+                    if self._cancelled:
+                        logger.info("TTS synthesis cancelled")
+                        break
+                    yield chunk
+            
+            duration = time.time() - start_time
+            logger.info(f"TTS synthesis complete: duration={duration:.2f}s")
+            
+        except asyncio.CancelledError:
+            logger.info("TTS synthesis task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error synthesizing speech: {e}", exc_info=True)
+            raise
+    
+    async def _synthesize_openai(self, text: str) -> AsyncIterator[AudioChunk]:
+        """
+        Synthesize using OpenAI TTS API.
+        
+        Args:
+            text: Text to synthesize
+            
+        Yields:
+            AudioChunk: Audio chunks
+        """
+        try:
+            start_time = time.time()
+            
+            # Create speech synthesis request
+            response = await self.client.audio.speech.create(
+                model=self.model,
+                voice=self.voice,
+                input=text,
+                response_format="pcm",  # Raw PCM for streaming
+                speed=1.0
+            )
+            
+            # Get the audio content
+            audio_content = response.content
+            
+            # Stream audio chunks - larger chunks for smoother playback
+            chunk_size = 16384  # 16KB chunks for smoother playback
+            sample_rate = 24000  # OpenAI TTS outputs 24kHz
+            
+            first_chunk = True
+            first_chunk_time = None
+            
+            # Split audio into chunks and yield immediately
+            for i in range(0, len(audio_content), chunk_size):
+                if first_chunk:
+                    first_chunk_time = time.time()
+                    first_chunk = False
+                
+                audio_bytes = audio_content[i:i + chunk_size]
+                
+                # Convert bytes to int16 numpy array
+                audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+                
+                # Calculate duration
+                duration_ms = int(len(audio_data) / sample_rate * 1000)
+                
+                chunk = AudioChunk(
+                    data=audio_data,
+                    sample_rate=sample_rate,
+                    timestamp=time.time(),
+                    duration_ms=duration_ms
+                )
+                
+                yield chunk
+            
+            # Log first chunk latency
+            if first_chunk_time:
+                latency_ms = (first_chunk_time - start_time) * 1000
+                if latency_ms > 500:
+                    logger.warning(
+                        f"First audio chunk latency: {latency_ms:.1f}ms (> 500ms)"
+                    )
+                    
+        except Exception as e:
+            logger.error(f"OpenAI TTS error: {e}", exc_info=True)
+            raise
+    
+    async def _synthesize_elevenlabs(self, text: str) -> AsyncIterator[AudioChunk]:
+        """
+        Synthesize using ElevenLabs TTS with high quality settings.
+        
+        Args:
+            text: Text to synthesize
+            
+        Yields:
+            AudioChunk: Audio chunks
+        """
+        try:
+            start_time = time.time()
+            
+            # Generate speech using ElevenLabs with high quality settings
+            # Use the correct API: text_to_speech.convert()
+            audio_stream = self.client.text_to_speech.convert(
+                voice_id=self.voice,
+                text=text,
+                model_id="eleven_multilingual_v2",  # Better quality model
+                output_format="pcm_24000",  # High quality PCM format
+                voice_settings={
+                    "stability": 0.75,  # Higher stability for cleaner audio
+                    "similarity_boost": 0.85  # Higher similarity for better voice quality
+                }
+            )
+            
+            # Stream audio chunks
+            chunk_size = 4096  # 4KB chunks
+            sample_rate = 24000  # ElevenLabs outputs 24kHz
+            
+            first_chunk = True
+            first_chunk_time = None
+            
+            # Collect audio data from iterator
+            audio_data = b""
+            for chunk in audio_stream:
+                audio_data += chunk
+            
+            # Ensure audio data length is even (required for int16)
+            if len(audio_data) % 2 != 0:
+                audio_data = audio_data[:-1]  # Remove last byte if odd
+            
+            # Split into chunks
+            for i in range(0, len(audio_data), chunk_size):
+                if first_chunk:
+                    first_chunk_time = time.time()
+                    first_chunk = False
+                
+                audio_bytes = audio_data[i:i + chunk_size]
+                
+                # Ensure this chunk is also even length
+                if len(audio_bytes) % 2 != 0:
+                    audio_bytes = audio_bytes[:-1]
+                
+                # Convert bytes to int16 numpy array
+                if len(audio_bytes) > 0:
+                    audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
+                    
+                    # Calculate duration
+                    duration_ms = int(len(audio_array) / sample_rate * 1000)
+                    
+                    chunk = AudioChunk(
+                        data=audio_array,
+                        sample_rate=sample_rate,
+                        timestamp=time.time(),
+                        duration_ms=duration_ms
+                    )
+                    
+                    yield chunk
+            
+            # Log first chunk latency
+            if first_chunk_time:
+                latency_ms = (first_chunk_time - start_time) * 1000
+                if latency_ms > 500:
+                    logger.warning(
+                        f"First audio chunk latency: {latency_ms:.1f}ms (> 500ms)"
+                    )
+                    
+        except Exception as e:
+            logger.error(f"ElevenLabs TTS error: {e}", exc_info=True)
+            raise
+    
+    async def _synthesize_edge_tts(self, text: str) -> AsyncIterator[AudioChunk]:
+        """
+        Synthesize using Edge-TTS.
+        
+        Args:
+            text: Text to synthesize
+            
+        Yields:
+            AudioChunk: Audio chunks
+        """
+        try:
+            # Create Edge-TTS communicator
+            communicate = edge_tts.Communicate(text, self.voice)
+            
+            sample_rate = 24000  # Edge-TTS outputs 24kHz
+            first_chunk = True
+            first_chunk_time = None
+            
+            # Stream audio chunks
+            async for chunk_data in communicate.stream():
+                if chunk_data["type"] == "audio":
+                    if first_chunk:
+                        first_chunk_time = time.time()
+                        first_chunk = False
+                    
+                    # Convert bytes to int16 numpy array
+                    audio_bytes = chunk_data["data"]
+                    audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+                    
+                    # Calculate duration
+                    duration_ms = int(len(audio_data) / sample_rate * 1000)
+                    
+                    chunk = AudioChunk(
+                        data=audio_data,
+                        sample_rate=sample_rate,
+                        timestamp=time.time(),
+                        duration_ms=duration_ms
+                    )
+                    
+                    yield chunk
+            
+            # Log first chunk latency
+            if first_chunk_time:
+                latency_ms = (first_chunk_time - start_time) * 1000
+                if latency_ms > 500:
+                    logger.warning(
+                        f"First audio chunk latency: {latency_ms:.1f}ms (> 500ms)"
+                    )
+                    
+        except Exception as e:
+            logger.error(f"Edge-TTS error: {e}", exc_info=True)
+            raise
+    
+    async def synthesize_stream(
+        self, 
+        token_stream: AsyncIterator[str]
+    ) -> AsyncIterator[AudioChunk]:
+        """
+        Buffer tokens until sentence boundaries and synthesize in parallel.
+        
+        This enables parallel processing: while synthesizing sentence N,
+        we're already collecting tokens for sentence N+1.
+        
+        Args:
+            token_stream: Stream of response tokens from LLM
+            
+        Yields:
+            AudioChunk: Audio chunks as they are generated
+        """
+        # Reset cancellation flag for this synthesis
+        self._cancelled = False
+        
+        buffer = ""
+        synthesis_tasks = []
+        
+        try:
+            async for token in token_stream:
+                if self._cancelled:
+                    logger.info("TTS stream synthesis cancelled")
+                    break
+                
+                # Add token to buffer
+                buffer += token
+                
+                # Check for sentence boundary
+                sentence, remaining = self._detect_sentence_boundary(buffer)
+                
+                if sentence:
+                    # Found complete sentence, start synthesizing it in parallel
+                    logger.debug(f"Synthesizing sentence: {sentence[:50]}...")
+                    
+                    # Create task for this sentence
+                    task = asyncio.create_task(self._synthesize_sentence_to_list(sentence))
+                    synthesis_tasks.append(task)
+                    
+                    # Keep remaining text in buffer
+                    buffer = remaining
+            
+            # Synthesize any remaining text
+            if buffer.strip() and not self._cancelled:
+                logger.debug(f"Synthesizing remaining text: {buffer[:50]}...")
+                task = asyncio.create_task(self._synthesize_sentence_to_list(buffer))
+                synthesis_tasks.append(task)
+            
+            # Yield audio chunks from completed synthesis tasks in order
+            for task in synthesis_tasks:
+                if self._cancelled:
+                    break
+                
+                try:
+                    audio_chunks = await task
+                    for chunk in audio_chunks:
+                        yield chunk
+                except Exception as e:
+                    logger.error(f"Error in sentence synthesis: {e}")
+                    
+        except asyncio.CancelledError:
+            logger.info("TTS stream synthesis task cancelled")
+            # Cancel all pending synthesis tasks
+            for task in synthesis_tasks:
+                if not task.done():
+                    task.cancel()
+            raise
+        except Exception as e:
+            logger.error(f"Error in stream synthesis: {e}", exc_info=True)
+            raise
+    
+    async def _synthesize_sentence_to_list(self, text: str) -> list:
+        """
+        Synthesize a sentence and collect all audio chunks into a list.
+        
+        Args:
+            text: Text to synthesize
+            
+        Returns:
+            List of AudioChunk objects
+        """
+        chunks = []
+        async for chunk in self.synthesize(text):
+            chunks.append(chunk)
+        return chunks
+    
+    async def cancel_synthesis(self) -> None:
+        """Cancel pending synthesis requests."""
+        logger.info("Cancelling TTS synthesis...")
+        self._cancelled = True
+        
+        # Cancel all pending tasks
+        for task in self._pending_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        
+        self._pending_tasks.clear()
+        logger.info("TTS synthesis cancelled")
+    
+    def is_synthesizing(self) -> bool:
+        """Check if currently synthesizing."""
+        return any(not task.done() for task in self._pending_tasks)
+

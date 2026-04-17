@@ -1,0 +1,146 @@
+"""Audio input capture module."""
+
+import asyncio
+import logging
+import numpy as np
+import sounddevice as sd
+from typing import Optional
+import time
+
+from src.models import AudioChunk
+
+
+logger = logging.getLogger(__name__)
+
+
+class AudioInputCapture:
+    """Captures audio from microphone and streams to downstream components."""
+    
+    def __init__(self, sample_rate: int = 16000, chunk_duration_ms: int = 100):
+        """
+        Initialize audio input capture.
+        
+        Args:
+            sample_rate: Audio sample rate in Hz (default: 16000)
+            chunk_duration_ms: Duration of each audio chunk in milliseconds (default: 100)
+        """
+        self.sample_rate = sample_rate
+        self.chunk_duration_ms = chunk_duration_ms
+        self.chunk_size = int(sample_rate * chunk_duration_ms / 1000)
+        
+        self._stream: Optional[sd.InputStream] = None
+        self._audio_queue: asyncio.Queue[AudioChunk] = asyncio.Queue()
+        self._running = False
+        
+        logger.info(
+            f"AudioInputCapture initialized: sample_rate={sample_rate}Hz, "
+            f"chunk_duration={chunk_duration_ms}ms, chunk_size={self.chunk_size} samples"
+        )
+    
+    def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
+        """
+        Callback function called by sounddevice for each audio chunk.
+        
+        Args:
+            indata: Input audio data as numpy array
+            frames: Number of frames
+            time_info: Time information
+            status: Status flags
+        """
+        if status:
+            logger.warning(f"Audio input status: {status}")
+        
+        if not self._running:
+            return
+        
+        # Convert to int16 and create AudioChunk
+        audio_data = (indata[:, 0] * 32767).astype(np.int16)
+        chunk = AudioChunk(
+            data=audio_data.copy(),
+            sample_rate=self.sample_rate,
+            timestamp=time.time(),
+            duration_ms=self.chunk_duration_ms
+        )
+        
+        # Put chunk in queue (non-blocking)
+        try:
+            self._audio_queue.put_nowait(chunk)
+        except asyncio.QueueFull:
+            logger.warning("Audio queue full, dropping chunk")
+    
+    async def start(self) -> None:
+        """
+        Initialize microphone and begin capturing audio.
+        
+        Raises:
+            RuntimeError: If microphone is unavailable or initialization fails
+        """
+        if self._running:
+            logger.warning("AudioInputCapture already running")
+            return
+        
+        try:
+            # Check if input device is available
+            default_input = sd.query_devices(kind='input')
+            logger.info(f"Using input device: {default_input['name']}")
+            
+            # Create input stream
+            self._stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,  # Mono
+                dtype=np.float32,
+                blocksize=self.chunk_size,
+                callback=self._audio_callback
+            )
+            
+            self._running = True
+            self._stream.start()
+            logger.info("Audio input capture started")
+            
+        except sd.PortAudioError as e:
+            error_msg = str(e).lower()
+            if "device unavailable" in error_msg or "no device" in error_msg:
+                raise RuntimeError(
+                    f"Microphone unavailable. Please check device connections. Error: {e}"
+                )
+            else:
+                logger.error(f"Audio device error: {e}")
+                raise RuntimeError(f"Failed to initialize audio input: {e}")
+        except Exception as e:
+            logger.error(f"Failed to start audio input: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to start audio input: {e}")
+    
+    async def get_audio_chunk(self) -> AudioChunk:
+        """
+        Get next audio chunk from capture queue.
+        
+        Returns:
+            AudioChunk: Next audio chunk
+        """
+        return await self._audio_queue.get()
+    
+    async def stop(self) -> None:
+        """Stop capturing and release microphone."""
+        if not self._running:
+            return
+        
+        logger.info("Stopping audio input capture...")
+        self._running = False
+        
+        if self._stream:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        
+        # Clear queue
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        
+        logger.info("Audio input capture stopped")
+    
+    def is_running(self) -> bool:
+        """Check if audio capture is running."""
+        return self._running
