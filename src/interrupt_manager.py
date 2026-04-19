@@ -31,8 +31,19 @@ logger = logging.getLogger(__name__)
 class InterruptManager:
     """Manages barge-in interrupts when user speaks during agent response."""
     
-    def __init__(self):
-        """Initialize interrupt manager."""
+    def __init__(
+        self,
+        interrupt_debounce_ms: int = 4500,
+        barge_in_min_confidence: float = 0.78,
+        barge_in_on: str = "speech_continue",
+    ):
+        """Initialize interrupt manager.
+        
+        Args:
+            interrupt_debounce_ms: Minimum time between interrupts (ms).
+            barge_in_min_confidence: VAD confidence required (0-1); filters TV/background.
+            barge_in_on: "speech_start" (faster) or "speech_continue" (needs sustained speech).
+        """
         self._state = SystemState.LISTENING
         self._monitoring = False
         self._interrupt_callbacks: list[Callable[[], Awaitable[None]]] = []
@@ -40,13 +51,14 @@ class InterruptManager:
         # Timing tracking
         self._last_interrupt_time: Optional[float] = None
         self._interrupt_count = 0
-        # ⚡ PERFORMANCE: Debounce time prevents rapid successive interrupts
-        # Current: 3500ms (3.5 seconds) - prevents cutting off agent responses
-        # Lower (1000-2000ms) = more responsive, may cut off responses
-        # Higher (4000-5000ms) = less responsive, more stable
-        self._interrupt_debounce_ms = 3500  # Minimum 3.5 seconds between interrupts to prevent cutting off responses
+        self._interrupt_debounce_ms = interrupt_debounce_ms
+        self._barge_in_min_confidence = barge_in_min_confidence
+        self._barge_in_on = barge_in_on
         
-        logger.info("InterruptManager initialized")
+        logger.info(
+            f"InterruptManager initialized: debounce={interrupt_debounce_ms}ms, "
+            f"min_confidence={barge_in_min_confidence}, trigger={barge_in_on}"
+        )
     
     def set_state(self, state: SystemState) -> None:
         """
@@ -100,40 +112,55 @@ class InterruptManager:
                 # Get next VAD event
                 vad_event = await vad_event_queue.get()
                 
-                # Check for barge-in condition:
-                # User starts speaking (SPEECH_START) while agent is speaking
-                if (vad_event.event_type == VADEventType.SPEECH_START and 
-                    is_playing_callback()):
-                    
-                    # Check debounce - prevent rapid successive interrupts
-                    current_time = time.time()
-                    if self._last_interrupt_time is not None:
-                        time_since_last_interrupt_ms = (current_time - self._last_interrupt_time) * 1000
-                        if time_since_last_interrupt_ms < self._interrupt_debounce_ms:
-                            logger.debug(
-                                f"Interrupt debounced: {time_since_last_interrupt_ms:.0f}ms "
-                                f"< {self._interrupt_debounce_ms}ms"
-                            )
-                            vad_event_queue.task_done()
-                            continue
-                    
-                    # Calculate detection latency
-                    detection_time = time.time()
-                    detection_latency_ms = (detection_time - vad_event.timestamp) * 1000
-                    
-                    logger.info(
-                        f"BARGE-IN detected! Latency: {detection_latency_ms:.1f}ms, "
-                        f"confidence: {vad_event.confidence:.2f}"
+                if not is_playing_callback():
+                    vad_event_queue.task_done()
+                    continue
+                
+                # Barge-in only on configured event type (START = fast; CONTINUE = fewer false triggers).
+                if self._barge_in_on == "speech_continue":
+                    trigger_ok = vad_event.event_type == VADEventType.SPEECH_CONTINUE
+                else:
+                    trigger_ok = vad_event.event_type == VADEventType.SPEECH_START
+                
+                if not trigger_ok:
+                    vad_event_queue.task_done()
+                    continue
+                
+                if vad_event.confidence < self._barge_in_min_confidence:
+                    logger.debug(
+                        f"Barge-in ignored: confidence {vad_event.confidence:.2f} "
+                        f"< {self._barge_in_min_confidence}"
                     )
-                    
-                    # Log warning if detection latency exceeds threshold
-                    if detection_latency_ms > 100:
-                        logger.warning(
-                            f"Barge-in detection latency: {detection_latency_ms:.1f}ms (> 100ms)"
+                    vad_event_queue.task_done()
+                    continue
+                
+                # Debounce - prevent rapid successive interrupts
+                current_time = time.time()
+                if self._last_interrupt_time is not None:
+                    time_since_last_interrupt_ms = (current_time - self._last_interrupt_time) * 1000
+                    if time_since_last_interrupt_ms < self._interrupt_debounce_ms:
+                        logger.debug(
+                            f"Interrupt debounced: {time_since_last_interrupt_ms:.0f}ms "
+                            f"< {self._interrupt_debounce_ms}ms"
                         )
-                    
-                    # Handle the interrupt
-                    await self.handle_interrupt()
+                        vad_event_queue.task_done()
+                        continue
+                
+                # Calculate detection latency
+                detection_time = time.time()
+                detection_latency_ms = (detection_time - vad_event.timestamp) * 1000
+                
+                logger.info(
+                    f"BARGE-IN detected! Latency: {detection_latency_ms:.1f}ms, "
+                    f"confidence: {vad_event.confidence:.2f}"
+                )
+                
+                if detection_latency_ms > 100:
+                    logger.warning(
+                        f"Barge-in detection latency: {detection_latency_ms:.1f}ms (> 100ms)"
+                    )
+                
+                await self.handle_interrupt()
                 
                 # Mark task as done
                 vad_event_queue.task_done()

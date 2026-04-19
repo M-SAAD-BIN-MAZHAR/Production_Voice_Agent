@@ -1,4 +1,4 @@
-"""Text-to-Speech service using OpenAI, ElevenLabs, or Edge-TTS."""
+"""Text-to-Speech service using OpenAI, ElevenLabs, Edge-TTS, or Pollinations."""
 
 import asyncio
 import logging
@@ -6,6 +6,7 @@ from typing import AsyncIterator, Optional
 import time
 import re
 import numpy as np
+import aiohttp
 
 from openai import AsyncOpenAI
 
@@ -36,23 +37,29 @@ class TTSService:
         provider: str = "openai",
         api_key: Optional[str] = None,
         voice: str = "alloy",
-        model: str = "tts-1"
+        model: str = "tts-1",
+        fallback_provider: Optional[str] = None,
+        fallback_api_key: Optional[str] = None,
+        fallback_voice: Optional[str] = None,
+        fallback_model: Optional[str] = None
     ):
         """
         Initialize TTS service.
         
         Args:
-            provider: TTS provider ("openai", "elevenlabs", or "edge-tts")
-            api_key: API key (required for openai and elevenlabs)
+            provider: TTS provider ("openai", "elevenlabs", "edge-tts", or "pollinations")
+            api_key: API key (required for openai and elevenlabs, not needed for pollinations)
             voice: Voice name 
                 - openai: alloy/echo/fable/onyx/nova/shimmer
                 - elevenlabs: bella/rachel/adam/arnold/charlotte/clyde/etc
                 - edge-tts: en-US-AriaNeural
+                - pollinations: alloy/echo/fable/onyx/nova/shimmer (same as OpenAI)
             model: Model name (openai: tts-1 or tts-1-hd)
         """
         self.provider = provider
         self.voice = voice
         self.model = model
+        self._fallback_service: Optional["TTSService"] = None
         
         # ElevenLabs voice ID mapping
         self.elevenlabs_voice_ids = {
@@ -90,8 +97,25 @@ class TTSService:
             self.client = None  # Edge-TTS doesn't need a client
             if voice == "alloy":  # Default OpenAI voice, switch to Edge-TTS default
                 self.voice = "en-US-AriaNeural"
+        elif provider == "pollinations":
+            self.client = None  # Pollinations doesn't need a client
+            self.pollinations_api_url = "https://text.pollinations.ai/openai"
         else:
             raise ValueError(f"Unsupported TTS provider: {provider}")
+        
+        # Optional fallback provider initialization.
+        if fallback_provider and fallback_provider != provider:
+            try:
+                self._fallback_service = TTSService(
+                    provider=fallback_provider,
+                    api_key=fallback_api_key,
+                    voice=fallback_voice or ("alloy" if fallback_provider == "openai" else voice),
+                    model=fallback_model or ("tts-1" if fallback_provider == "openai" else model)
+                )
+                logger.info(f"TTS fallback enabled: {provider} -> {fallback_provider}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize TTS fallback provider '{fallback_provider}': {e}")
+                self._fallback_service = None
         
         # Cancellation state
         self._cancelled = False
@@ -167,6 +191,12 @@ class TTSService:
                         logger.info("TTS synthesis cancelled")
                         break
                     yield chunk
+            elif self.provider == "pollinations":
+                async for chunk in self._synthesize_pollinations(text):
+                    if self._cancelled:
+                        logger.info("TTS synthesis cancelled")
+                        break
+                    yield chunk
             
             duration = time.time() - start_time
             logger.info(f"TTS synthesis complete: duration={duration:.2f}s")
@@ -175,7 +205,14 @@ class TTSService:
             logger.info("TTS synthesis task cancelled")
             raise
         except Exception as e:
-            logger.error(f"Error synthesizing speech: {e}", exc_info=True)
+            logger.error(f"Error synthesizing speech with {self.provider}: {e}", exc_info=True)
+            if self._fallback_service:
+                logger.warning(f"Falling back TTS provider to {self._fallback_service.provider}")
+                async for chunk in self._fallback_service.synthesize(text):
+                    if self._cancelled:
+                        break
+                    yield chunk
+                return
             raise
     
     async def _synthesize_openai(self, text: str) -> AsyncIterator[AudioChunk]:
@@ -293,49 +330,59 @@ class TTSService:
                 }
             )
             
-            # Stream audio chunks
+            # Stream audio chunks directly to reduce first-byte latency.
             chunk_size = 4096  # 4KB chunks
             sample_rate = 24000  # ElevenLabs outputs 24kHz
             
             first_chunk = True
             first_chunk_time = None
+            byte_buffer = b""
             
-            # Collect audio data from iterator
-            audio_data = b""
-            for chunk in audio_stream:
-                audio_data += chunk
-            
-            # Ensure audio data length is even (required for int16)
-            if len(audio_data) % 2 != 0:
-                audio_data = audio_data[:-1]  # Remove last byte if odd
-            
-            # Split into chunks
-            for i in range(0, len(audio_data), chunk_size):
-                if first_chunk:
-                    first_chunk_time = time.time()
-                    first_chunk = False
+            for raw_chunk in audio_stream:
+                if self._cancelled:
+                    break
+                if not raw_chunk:
+                    continue
                 
-                audio_bytes = audio_data[i:i + chunk_size]
+                byte_buffer += raw_chunk
                 
-                # Ensure this chunk is also even length
-                if len(audio_bytes) % 2 != 0:
-                    audio_bytes = audio_bytes[:-1]
-                
-                # Convert bytes to int16 numpy array
-                if len(audio_bytes) > 0:
+                while len(byte_buffer) >= chunk_size:
+                    if first_chunk:
+                        first_chunk_time = time.time()
+                        first_chunk = False
+                    
+                    audio_bytes = byte_buffer[:chunk_size]
+                    byte_buffer = byte_buffer[chunk_size:]
+                    
+                    if len(audio_bytes) % 2 != 0:
+                        audio_bytes = audio_bytes[:-1]
+                    if not audio_bytes:
+                        continue
+                    
                     audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-                    
-                    # Calculate duration
                     duration_ms = int(len(audio_array) / sample_rate * 1000)
-                    
-                    chunk = AudioChunk(
+                    yield AudioChunk(
                         data=audio_array,
                         sample_rate=sample_rate,
                         timestamp=time.time(),
                         duration_ms=duration_ms
                     )
-                    
-                    yield chunk
+            
+            # Flush residual bytes at stream end.
+            if byte_buffer and not self._cancelled:
+                if len(byte_buffer) % 2 != 0:
+                    byte_buffer = byte_buffer[:-1]
+                if byte_buffer:
+                    if first_chunk:
+                        first_chunk_time = time.time()
+                    audio_array = np.frombuffer(byte_buffer, dtype=np.int16)
+                    duration_ms = int(len(audio_array) / sample_rate * 1000)
+                    yield AudioChunk(
+                        data=audio_array,
+                        sample_rate=sample_rate,
+                        timestamp=time.time(),
+                        duration_ms=duration_ms
+                    )
             
             # Log first chunk latency
             if first_chunk_time:
@@ -360,6 +407,8 @@ class TTSService:
             AudioChunk: Audio chunks
         """
         try:
+            start_time = time.time()
+            
             # Create Edge-TTS communicator
             communicate = edge_tts.Communicate(text, self.voice)
             
@@ -402,6 +451,83 @@ class TTSService:
             logger.error(f"Edge-TTS error: {e}", exc_info=True)
             raise
     
+    async def _synthesize_pollinations(self, text: str) -> AsyncIterator[AudioChunk]:
+        """
+        Synthesize using Pollinations AI TTS (free, no API key required).
+        
+        Args:
+            text: Text to synthesize
+            
+        Yields:
+            AudioChunk: Audio chunks
+        """
+        try:
+            start_time = time.time()
+            
+            # Pollinations TTS API endpoint
+            # Uses OpenAI-compatible voices
+            url = f"https://text.pollinations.ai/openai?voice={self.voice}"
+            
+            # Make request to Pollinations TTS API
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    data=text.encode('utf-8'),
+                    headers={"Content-Type": "text/plain"},
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise Exception(f"Pollinations TTS API error: {response.status} - {error_text}")
+                    
+                    # Get the audio content
+                    audio_content = await response.read()
+                    
+                    # Stream audio chunks
+                    chunk_size = 16384  # 16KB chunks for smooth playback
+                    sample_rate = 24000  # Pollinations outputs 24kHz
+                    
+                    first_chunk = True
+                    first_chunk_time = None
+                    
+                    # Split audio into chunks and yield immediately
+                    for i in range(0, len(audio_content), chunk_size):
+                        if first_chunk:
+                            first_chunk_time = time.time()
+                            first_chunk = False
+                        
+                        audio_bytes = audio_content[i:i + chunk_size]
+                        
+                        # Convert bytes to int16 numpy array
+                        audio_data = np.frombuffer(audio_bytes, dtype=np.int16)
+                        
+                        # Volume amplification (same as OpenAI)
+                        audio_data = np.clip(audio_data * 1.5, -32768, 32767).astype(np.int16)
+                        
+                        # Calculate duration
+                        duration_ms = int(len(audio_data) / sample_rate * 1000)
+                        
+                        chunk = AudioChunk(
+                            data=audio_data,
+                            sample_rate=sample_rate,
+                            timestamp=time.time(),
+                            duration_ms=duration_ms
+                        )
+                        
+                        yield chunk
+                    
+                    # Log first chunk latency
+                    if first_chunk_time:
+                        latency_ms = (first_chunk_time - start_time) * 1000
+                        if latency_ms > 500:
+                            logger.warning(
+                                f"First audio chunk latency: {latency_ms:.1f}ms (> 500ms)"
+                            )
+                        
+        except Exception as e:
+            logger.error(f"Pollinations TTS error: {e}", exc_info=True)
+            raise
+    
     async def synthesize_stream(
         self, 
         token_stream: AsyncIterator[str]
@@ -422,7 +548,25 @@ class TTSService:
         self._cancelled = False
         
         buffer = ""
-        synthesis_tasks = []
+        synthesis_tasks: dict[int, asyncio.Task] = {}
+        next_task_idx = 0
+        next_emit_idx = 0
+        self._pending_tasks.clear()
+        
+        async def _emit_ready_tasks() -> AsyncIterator[AudioChunk]:
+            nonlocal next_emit_idx
+            while next_emit_idx in synthesis_tasks and synthesis_tasks[next_emit_idx].done():
+                task = synthesis_tasks.pop(next_emit_idx)
+                self._pending_tasks = [t for t in self._pending_tasks if t is not task]
+                try:
+                    audio_chunks = task.result()
+                    for chunk in audio_chunks:
+                        if self._cancelled:
+                            return
+                        yield chunk
+                except Exception as e:
+                    logger.error(f"Error in sentence synthesis: {e}")
+                next_emit_idx += 1
         
         try:
             async for token in token_stream:
@@ -442,39 +586,55 @@ class TTSService:
                     
                     # Create task for this sentence
                     task = asyncio.create_task(self._synthesize_sentence_to_list(sentence))
-                    synthesis_tasks.append(task)
+                    synthesis_tasks[next_task_idx] = task
+                    self._pending_tasks.append(task)
+                    next_task_idx += 1
                     
                     # Keep remaining text in buffer
                     buffer = remaining
+                    
+                    # Emit finished tasks immediately for lower latency.
+                    async for ready_chunk in _emit_ready_tasks():
+                        yield ready_chunk
             
             # Synthesize any remaining text
             if buffer.strip() and not self._cancelled:
                 logger.debug(f"Synthesizing remaining text: {buffer[:50]}...")
                 task = asyncio.create_task(self._synthesize_sentence_to_list(buffer))
-                synthesis_tasks.append(task)
+                synthesis_tasks[next_task_idx] = task
+                self._pending_tasks.append(task)
+            
+            # Emit any tasks that already completed before final drain.
+            async for ready_chunk in _emit_ready_tasks():
+                yield ready_chunk
             
             # Yield audio chunks from completed synthesis tasks in order
-            for task in synthesis_tasks:
+            while next_emit_idx in synthesis_tasks:
                 if self._cancelled:
                     break
                 
+                task = synthesis_tasks.pop(next_emit_idx)
+                self._pending_tasks = [t for t in self._pending_tasks if t is not task]
                 try:
                     audio_chunks = await task
                     for chunk in audio_chunks:
                         yield chunk
                 except Exception as e:
                     logger.error(f"Error in sentence synthesis: {e}")
+                next_emit_idx += 1
                     
         except asyncio.CancelledError:
             logger.info("TTS stream synthesis task cancelled")
             # Cancel all pending synthesis tasks
-            for task in synthesis_tasks:
+            for task in synthesis_tasks.values():
                 if not task.done():
                     task.cancel()
             raise
         except Exception as e:
             logger.error(f"Error in stream synthesis: {e}", exc_info=True)
             raise
+        finally:
+            self._pending_tasks.clear()
     
     async def _synthesize_sentence_to_list(self, text: str) -> list:
         """

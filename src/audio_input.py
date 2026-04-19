@@ -16,7 +16,12 @@ logger = logging.getLogger(__name__)
 class AudioInputCapture:
     """Captures audio from microphone and streams to downstream components."""
     
-    def __init__(self, sample_rate: int = 16000, chunk_duration_ms: int = 100):
+    def __init__(
+        self,
+        sample_rate: int = 16000,
+        chunk_duration_ms: int = 100,
+        queue_maxsize: int = 50
+    ):
         """
         Initialize audio input capture.
         
@@ -29,13 +34,29 @@ class AudioInputCapture:
         self.chunk_size = int(sample_rate * chunk_duration_ms / 1000)
         
         self._stream: Optional[sd.InputStream] = None
-        self._audio_queue: asyncio.Queue[AudioChunk] = asyncio.Queue()
+        self._audio_queue: asyncio.Queue[AudioChunk] = asyncio.Queue(maxsize=queue_maxsize)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = False
         
         logger.info(
             f"AudioInputCapture initialized: sample_rate={sample_rate}Hz, "
             f"chunk_duration={chunk_duration_ms}ms, chunk_size={self.chunk_size} samples"
         )
+    
+    def _enqueue_audio_chunk(self, chunk: AudioChunk) -> None:
+        """Enqueue audio chunk on the event loop thread."""
+        try:
+            self._audio_queue.put_nowait(chunk)
+        except asyncio.QueueFull:
+            # Drop oldest to keep latency low and preserve recency.
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self._audio_queue.put_nowait(chunk)
+            except asyncio.QueueFull:
+                logger.warning("Audio queue still full, dropping incoming chunk")
     
     def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status):
         """
@@ -64,11 +85,9 @@ class AudioInputCapture:
             duration_ms=self.chunk_duration_ms
         )
         
-        # Put chunk in queue (non-blocking)
-        try:
-            self._audio_queue.put_nowait(chunk)
-        except asyncio.QueueFull:
-            logger.warning("Audio queue full, dropping chunk")
+        # Thread-safe handoff from sounddevice callback thread to event loop.
+        if self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._enqueue_audio_chunk, chunk)
     
     async def start(self) -> None:
         """
@@ -82,6 +101,8 @@ class AudioInputCapture:
             return
         
         try:
+            self._loop = asyncio.get_running_loop()
+            
             # Check if input device is available
             default_input = sd.query_devices(kind='input')
             logger.info(f"Using input device: {default_input['name']}")
@@ -133,6 +154,7 @@ class AudioInputCapture:
         
         logger.info("Stopping audio input capture...")
         self._running = False
+        self._loop = None
         
         if self._stream:
             self._stream.stop()

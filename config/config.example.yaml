@@ -15,19 +15,54 @@ system_prompt: |
   suitable for speech output. Keep responses brief and conversational.
 
 # Text-to-Speech Configuration
-tts_provider: openai  # Options: openai, edge-tts
-tts_voice: alloy  # OpenAI voices: alloy, echo, fable, onyx, nova, shimmer
+tts_provider: elevenlabs  # Recommended: elevenlabs for quality + streaming, options: openai, elevenlabs, edge-tts
+tts_voice: rachel  # ElevenLabs voices: bella, rachel, adam, etc.
+                  # OpenAI voices: alloy, echo, fable, onyx, nova, shimmer
                   # Edge-TTS voice: en-US-AriaNeural
-tts_model: tts-1  # Options: tts-1, tts-1-hd (OpenAI only)
+tts_model: tts-1  # OpenAI only (ignored by elevenlabs/edge-tts)
+elevenlabs_api_key: YOUR_ELEVENLABS_API_KEY_HERE
 
 # Voice Activity Detection Configuration
 vad_provider: silero  # Options: silero, deepgram
-vad_threshold: 0.5  # Speech detection threshold (0.0-1.0)
+# Higher = less sensitive to background/TV (try 0.65–0.85 if too many false detections)
+vad_threshold: 0.62
 vad_silence_duration_ms: 700  # Milliseconds of silence before endpoint
+
+# Barge-in (interrupt agent while it speaks)
+# Higher confidence = only strong “foreground” speech triggers interrupt
+barge_in_min_confidence: 0.78
+interrupt_debounce_ms: 4500
+# speech_continue = needs sustained speech (fewer false interrupts from TV/noise)
+# speech_start = faster barge-in, more sensitive
+barge_in_on: speech_continue
 
 # Audio Configuration
 sample_rate: 16000  # Audio sample rate in Hz (8000, 16000, 24000, 44100, 48000)
 chunk_duration_ms: 100  # Audio chunk duration in milliseconds
+
+# Microphone DSP (reduces rumble/hiss; true AEC needs playback reference + WebRTC-class stack)
+# Requires scipy for highpass modes: pip install scipy
+input_dsp: none  # none | highpass | noise_gate | highpass_noise_gate
+input_dsp_highpass_hz: 80
+input_dsp_noise_gate_rms: 800
+
+# Input gating for noisy rooms (laptop mic + speakers)
+# continuous = always listen | push_to_talk = hold key | wake_word = needs pip install openwakeword
+voice_input_mode: continuous
+push_to_talk_key: space
+# After each Enter, mic stays open ~N seconds (0 = off). Works even when stdin is not a TTY (e.g. Cursor integrated terminal).
+push_to_talk_stdin_arm_seconds: 30
+# Mic gate open for the first N seconds after start (0 = off). Prevents “silent hang” when keys/stdin never arm PTT.
+push_to_talk_startup_open_seconds: 12
+# Re-open gate for N seconds after each assistant reply and after barge-in (0 = Enter/Space only between turns).
+push_to_talk_after_response_open_seconds: 25
+wake_word_models:
+  - alexa
+wake_word_sensitivity: 0.5
+wake_word_window_seconds: 30
+
+# Log METRICS lines: time to first LLM token and first TTS audio per turn
+metrics_enabled: true
 
 # Memory Configuration
 memory_max_turns: 10  # Maximum conversation turns to store

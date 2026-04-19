@@ -53,6 +53,38 @@ async def test_llm_service_initialization(llm_service):
 
 
 @pytest.mark.asyncio
+async def test_on_first_token_hook_called_once(llm_service):
+    """First content token invokes optional callback once."""
+    called = []
+
+    def hook():
+        called.append(1)
+
+    async def mock_create(*args, **kwargs):
+        class MockChoice:
+            def __init__(self, content, finish_reason=None):
+                self.delta = MagicMock()
+                self.delta.content = content
+                self.finish_reason = finish_reason
+
+        class MockChunk:
+            def __init__(self, content, finish_reason=None):
+                self.choices = [MockChoice(content, finish_reason)]
+
+        yield MockChunk("a", None)
+        yield MockChunk("b", "stop")
+
+    llm_service.client.chat.completions.create = mock_create
+
+    tokens = []
+    async for token in llm_service.generate_response("x", [], on_first_token=hook):
+        tokens.append(token)
+
+    assert tokens == ["a", "b"]
+    assert called == [1]
+
+
+@pytest.mark.asyncio
 async def test_generate_response_streams_tokens(llm_service):
     """Test that response tokens are streamed incrementally."""
     # Mock the OpenAI client
@@ -176,7 +208,7 @@ async def test_cancel_generation(llm_service):
     # Wait for task to complete
     try:
         await asyncio.wait_for(task, timeout=1.0)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         pass
     
     # Verify generation was stopped early

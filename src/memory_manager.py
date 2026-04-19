@@ -194,8 +194,8 @@ class MemoryManager:
             
             logger.info(f"Added conversation turn (total: {len(self._turns)})")
             
-            # Save to disk
-            self._save_vector_store()
+            # Save to disk off the event loop to reduce tail latency.
+            await asyncio.to_thread(self._save_vector_store)
             
         except Exception as e:
             logger.error(f"Error adding conversation turn: {e}", exc_info=True)

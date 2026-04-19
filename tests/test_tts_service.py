@@ -94,16 +94,11 @@ async def test_synthesize_openai(tts_service_openai):
     """Test OpenAI synthesis."""
     # Mock the OpenAI client
     mock_response = AsyncMock()
-    
-    async def mock_iter_bytes(chunk_size):
-        # Simulate audio chunks
-        for i in range(3):
-            await asyncio.sleep(0.01)
-            # Generate fake audio data
-            audio_bytes = np.random.randint(-1000, 1000, 1600, dtype=np.int16).tobytes()
-            yield audio_bytes
-    
-    mock_response.iter_bytes = mock_iter_bytes
+    audio_chunks = [
+        np.random.randint(-1000, 1000, 1600, dtype=np.int16).tobytes()
+        for _ in range(3)
+    ]
+    mock_response.content = b"".join(audio_chunks)
     tts_service_openai.client.audio.speech.create = AsyncMock(return_value=mock_response)
     
     # Synthesize text
@@ -113,8 +108,8 @@ async def test_synthesize_openai(tts_service_openai):
     async for chunk in tts_service_openai.synthesize(text):
         chunks.append(chunk)
     
-    # Verify chunks were generated
-    assert len(chunks) == 3
+    # Verify chunks were generated (chunk count depends on internal chunk size)
+    assert len(chunks) >= 1
     for chunk in chunks:
         assert isinstance(chunk, AudioChunk)
         assert chunk.sample_rate == 24000
@@ -253,12 +248,9 @@ async def test_punctuation_preservation(tts_service_openai):
         nonlocal synthesized_text
         synthesized_text = kwargs.get("input")
         
-        # Return mock response
+        # Return mock response with PCM payload bytes
         mock_response = AsyncMock()
-        async def mock_iter_bytes(chunk_size):
-            audio_bytes = np.random.randint(-1000, 1000, 1600, dtype=np.int16).tobytes()
-            yield audio_bytes
-        mock_response.iter_bytes = mock_iter_bytes
+        mock_response.content = np.random.randint(-1000, 1000, 1600, dtype=np.int16).tobytes()
         return mock_response
     
     tts_service_openai.client.audio.speech.create = mock_create
@@ -281,10 +273,7 @@ async def test_voice_consistency(tts_service_openai):
         voice_used.append(kwargs.get("voice"))
         
         mock_response = AsyncMock()
-        async def mock_iter_bytes(chunk_size):
-            audio_bytes = np.random.randint(-1000, 1000, 1600, dtype=np.int16).tobytes()
-            yield audio_bytes
-        mock_response.iter_bytes = mock_iter_bytes
+        mock_response.content = np.random.randint(-1000, 1000, 1600, dtype=np.int16).tobytes()
         return mock_response
     
     tts_service_openai.client.audio.speech.create = mock_create

@@ -63,6 +63,25 @@ async def main():
     logger = logging.getLogger(__name__)
     logger.info("🎤 Real-Time Voice Agent System starting...")
     
+    if config.voice_input_mode == "push_to_talk":
+        if config.push_to_talk_stdin_arm_seconds > 0:
+            logger.info(
+                "Push-to-talk: hold '%s' while speaking, or press Enter in this terminal "
+                "to arm the mic for ~%.0fs (helps when Space does not work in an IDE terminal).",
+                config.push_to_talk_key,
+                config.push_to_talk_stdin_arm_seconds,
+            )
+        else:
+            logger.info(
+                "Push-to-talk: hold key '%s' while speaking so mic audio reaches STT/VAD.",
+                config.push_to_talk_key,
+            )
+    elif config.voice_input_mode == "wake_word":
+        logger.info(
+            "Wake-word mode: say a trained phrase first; window stays open %.0fs.",
+            config.wake_word_window_seconds,
+        )
+    
     # Create voice agent
     agent_instance = VoiceAgent(config)
     

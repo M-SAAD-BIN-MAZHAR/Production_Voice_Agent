@@ -89,7 +89,7 @@ async def test_stt_send_audio(mock_client_class):
     mock_connection = AsyncMock()
     mock_connection.start_listening = AsyncMock()
     mock_connection.on = Mock()
-    mock_connection.send = Mock()
+    mock_connection.send_media = AsyncMock()
     mock_connection.__aenter__ = AsyncMock(return_value=mock_connection)
     mock_connection.__aexit__ = AsyncMock()
     
@@ -104,8 +104,8 @@ async def test_stt_send_audio(mock_client_class):
     chunk = create_audio_chunk(duration_ms=100)
     await stt.send_audio(chunk)
     
-    # Verify send was called
-    assert mock_connection.send.called
+    # Verify send_media was called
+    assert mock_connection.send_media.called
     assert stt.is_connected()
 
 

@@ -85,6 +85,12 @@ class VADModule:
             self._model_loaded = True
             logger.warning("Using fallback energy-based VAD")
     
+    async def warmup(self) -> None:
+        """Preload VAD model outside first audio-processing path."""
+        if self._model_loaded:
+            return
+        await asyncio.to_thread(self._load_model)
+    
     def _simple_vad(self, audio_chunk: AudioChunk) -> float:
         """
         Simple energy-based VAD fallback.
@@ -161,7 +167,7 @@ class VADModule:
         """
         # Lazy load model on first use
         if not self._model_loaded:
-            self._load_model()
+            await asyncio.to_thread(self._load_model)
         
         # Get speech probability
         speech_prob = self._silero_vad(chunk)
@@ -219,9 +225,9 @@ class VADModule:
                         confidence=1.0 - speech_prob
                     )
                 else:
-                    # Still in SPEECH_START (short silence)
+                    # Short silence during speech start should remain speech continuation.
                     return VADEvent(
-                        event_type=VADEventType.SPEECH_START,
+                        event_type=VADEventType.SPEECH_CONTINUE,
                         timestamp=current_time,
                         confidence=speech_prob
                     )
