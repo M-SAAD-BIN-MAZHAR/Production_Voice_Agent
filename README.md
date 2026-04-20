@@ -438,5 +438,4 @@ MIT License - see LICENSE file for details
 - [ ] Multi-modal input (text + voice)
 
 ---
-
-**Built with ❤️ for the voice AI community**
+![alt text](<ChatGPT Image Apr 20, 2026, 12_48_16 AM.png>)
