@@ -437,5 +437,4 @@ MIT License - see LICENSE file for details
 - [ ] Emotion detection
 - [ ] Multi-modal input (text + voice)
 
----
-![alt text](<ChatGPT Image Apr 20, 2026, 12_48_16 AM.png>)
+![Technical Architecture](Technical_Architecture.png)
